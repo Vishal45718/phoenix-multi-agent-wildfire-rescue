@@ -1,6 +1,6 @@
 """
 PROJECT FIRE-SAR: Full Execution Pipeline (Phases 1-4)
-Includes Monte Carlo Benchmarking with Hardware Malfunction & Packet Loss
+Includes Monte Carlo Benchmarking with Hardware Malfunction, Packet Loss, & Round-Trip Logistics
 """
 import numpy as np
 
@@ -10,39 +10,45 @@ from src.safety import ActiveSTLController, EpistemicLogicGuard
 from src.coordination import GraphManager, ADMMConsensusOptimizer, RescueDispatchManager
 from src.visualization import generate_dashboard
 
-def run_monte_carlo(num_trials=12, steps=28, packet_loss_prob=0.15, malfunction_step=10):
+def run_monte_carlo(num_trials=10, steps=45, packet_loss_prob=0.15, malfunction_step=15):
     modes = ["Random_Search", "Greedy_Uncoordinated", "FIRE_SAR_Proposed"]
     results = {m: {'survival_rate': [], 'rescued_ratio': [], 'stl_violations': [], 'detection_time': []} for m in modes}
 
     for mode in modes:
         for trial in range(num_trials):
             env = ForestEnvironment(width=100, height=100, wind_vector=(2.8, 1.8))
-            np.random.seed(200 + trial)
+            np.random.seed(300 + trial)
             env.canopy = np.random.uniform(0.1, 0.65, (env.H, env.W))
             env.ignite(30, 30, radius=3)
 
+            # Spawn 10 Survivors to force logistics round-trips
             survivors = [
-                SurvivorAgent(0, [34.0, 33.0], voice_radius=10.0, mobility=0.25, goal=[85.0, 85.0]),
-                SurvivorAgent(1, [35.0, 32.0], voice_radius=10.0, mobility=0.30, goal=[85.0, 85.0]),
-                SurvivorAgent(2, [42.0, 38.0], voice_radius=10.0, mobility=0.45, goal=[85.0, 85.0]),
-                SurvivorAgent(3, [46.0, 44.0], voice_radius=10.0, mobility=0.80, goal=[85.0, 85.0]),
-                SurvivorAgent(4, [52.0, 48.0], voice_radius=10.0, mobility=0.85, goal=[85.0, 85.0]),
-                SurvivorAgent(5, [58.0, 52.0], voice_radius=10.0, mobility=0.90, goal=[85.0, 85.0])
+                SurvivorAgent(0, [34.0, 33.0], mobility=0.25, goal=[85.0, 85.0]),
+                SurvivorAgent(1, [35.0, 32.0], mobility=0.30, goal=[85.0, 85.0]),
+                SurvivorAgent(2, [42.0, 38.0], mobility=0.45, goal=[85.0, 85.0]),
+                SurvivorAgent(3, [46.0, 44.0], mobility=0.80, goal=[85.0, 85.0]),
+                SurvivorAgent(4, [52.0, 48.0], mobility=0.85, goal=[85.0, 85.0]),
+                SurvivorAgent(5, [58.0, 52.0], mobility=0.90, goal=[85.0, 85.0]),
+                SurvivorAgent(6, [38.0, 40.0], mobility=0.35, goal=[85.0, 85.0]),
+                SurvivorAgent(7, [40.0, 42.0], mobility=0.40, goal=[85.0, 85.0]),
+                SurvivorAgent(8, [60.0, 65.0], mobility=0.95, goal=[85.0, 85.0]),
+                SurvivorAgent(9, [62.0, 68.0], mobility=1.00, goal=[85.0, 85.0])
             ]
             for s in survivors:
-                s.health = 38.0 if s.mobility < 0.4 else 85.0
+                s.health = 45.0 if s.mobility < 0.5 else 90.0
 
             uavs = [
-                UAVAgent(0, [14.0, 62.0], [10.0, 90.0], v_max=5.5, comm_radius=32.0, battery=100.0),
-                UAVAgent(1, [18.0, 58.0], [10.0, 90.0], v_max=5.2, comm_radius=32.0, battery=100.0),
-                UAVAgent(2, [25.0, 68.0], [10.0, 90.0], v_max=5.0, comm_radius=30.0, battery=100.0),
-                UAVAgent(3, [62.0, 75.0], [10.0, 90.0], v_max=5.0, comm_radius=30.0, battery=100.0),
-                UAVAgent(4, [72.0, 22.0], [10.0, 90.0], v_max=4.8, comm_radius=28.0, battery=24.0)
+                UAVAgent(0, pos=[14.0, 62.0], home_pos=[5.0, 95.0], role='Scout', v_max=5.5, comm_radius=32.0, battery=100.0),
+                UAVAgent(1, pos=[18.0, 58.0], home_pos=[5.0, 95.0], role='Scout', v_max=5.2, comm_radius=32.0, battery=100.0),
+                UAVAgent(2, pos=[25.0, 68.0], home_pos=[5.0, 95.0], role='Surveyor', v_max=5.0, comm_radius=30.0, battery=100.0),
+                UAVAgent(3, pos=[62.0, 75.0], home_pos=[5.0, 95.0], role='Surveyor', v_max=5.0, comm_radius=30.0, battery=100.0),
+                UAVAgent(4, pos=[72.0, 22.0], home_pos=[5.0, 95.0], role='Relay', v_max=4.8, comm_radius=28.0, battery=28.0) # Low battery to trigger return
             ]
             
+            # Ground Rescue Vehicles initialized with a Hospital/Base coordinate
             rvs = [
-                RescueVehicle(0, [26.0, 28.0], max_speed=5.0),
-                RescueVehicle(1, [60.0, 58.0], max_speed=5.0)
+                RescueVehicle(0, pos=[26.0, 28.0], base_pos=[5.0, 5.0], max_speed=5.0, capacity=3),
+                RescueVehicle(1, pos=[60.0, 58.0], base_pos=[95.0, 5.0], max_speed=5.0, capacity=3)
             ]
 
             stl_ctrl = ActiveSTLController(d_safe=5.5, d_fire=9.0, h_min=25.0, buffer_zone=6.5, k_repel=8.5)
@@ -62,10 +68,9 @@ def run_monte_carlo(num_trials=12, steps=28, packet_loss_prob=0.15, malfunction_
 
                 # --- CATASTROPHIC MALFUNCTION INJECTION ---
                 if step == malfunction_step and len(uavs) > 2:
-                    # Drone 0 suffers critical hardware failure and drops from the sky
                     failed_drone = uavs.pop(0)
                     default_cmds.pop(0)
-                    if trial == 0:  # Just print for the first trial so we don't spam the console
+                    if trial == 0:
                         print(f"[{mode}] Step {step}: CRITICAL FAILURE! UAV {failed_drone.id} went offline. Surviving swarm is adapting...")
 
                 for s in survivors:
@@ -83,7 +88,6 @@ def run_monte_carlo(num_trials=12, steps=28, packet_loss_prob=0.15, malfunction_
                         detected_any = True
 
                 if mode == "FIRE_SAR_Proposed":
-                    # Decentralized graph computation automatically adjusts to the N-1 surviving drones
                     A, D, L, l2 = GraphManager.compute_uav_matrices(uavs)
                     
                     # 15% Packet loss simulation
@@ -112,7 +116,6 @@ def run_monte_carlo(num_trials=12, steps=28, packet_loss_prob=0.15, malfunction_
                     stl_violation_count += 1
 
                 if mode == "FIRE_SAR_Proposed":
-                    # ADMM seamlessly re-allocates tasks across the N-1 surviving drones
                     allocs = ADMMConsensusOptimizer.run_assignment(uavs, rvs, active_survivors, max_iters=15)
                     RescueDispatchManager.step_rescue_vehicles(rvs, survivors, uavs, allocs, env, t_now, dt=1.0, require_epistemic=True)
                 elif mode == "Greedy_Uncoordinated":
@@ -131,10 +134,10 @@ def run_monte_carlo(num_trials=12, steps=28, packet_loss_prob=0.15, malfunction_
 
 if __name__ == "__main__":
     print("=== STARTING FIRE-SAR PHASE 4 MONTE CARLO BENCHMARKS ===")
-    print("Testing Fault Tolerance: Mid-flight catastrophic drone failure at Step 10 + 15% Packet Loss...\n")
-    mc_results = run_monte_carlo(num_trials=12, steps=28)
+    print("Testing Fault Tolerance (Drone failure at Step 15) & Round-Trip Logistics (10 Survivors)...\n")
+    mc_results = run_monte_carlo(num_trials=10, steps=45)
     
-    print("\n=== MONTE CARLO BENCHMARK RESULTS (12 Trials) ===")
+    print("\n=== MONTE CARLO BENCHMARK RESULTS (10 Trials) ===")
     for m, metrics in mc_results.items():
         print(f"{m:22s} | Survival: {np.mean(metrics['survival_rate']):6.1%} | "
               f"Rescued: {np.mean(metrics['rescued_ratio']):6.1%} | "
