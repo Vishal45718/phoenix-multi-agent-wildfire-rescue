@@ -1,126 +1,121 @@
+"""
+PROJECT FIRE-SAR: Full Execution Pipeline (Phases 1-4)
+Orchestrates Environment, UAVs, Survivors, ADMM Rescue Dispatch, and Formal Safety.
+"""
 import numpy as np
+import os
+import matplotlib.pyplot as plt
 
+# Import from source modules
 from src.environment import ForestEnvironment
 from src.agents import SurvivorAgent, UAVAgent, RescueVehicle
-from src.safety import ActiveSTLController, EpistemicLogicGuard
 from src.coordination import GraphManager, ADMMConsensusOptimizer, RescueDispatchManager
-from src.visualization import generate_dashboard
+from src.safety import ActiveSTLController, STLMonitor
 
-def run_monte_carlo(num_trials=12, steps=28, packet_loss_prob=0.15):
-    modes = ["Random_Search", "Greedy_Uncoordinated", "FIRE_SAR_Proposed"]
-    results = {m: {'survival_rate': [], 'rescued_ratio': [], 'stl_violations': [], 'detection_time': []} for m in modes}
+def run_full_mission():
+    np.random.seed(42)
+    current_time = 0.0
+    dt = 0.5
+    max_steps = 60
 
-    for mode in modes:
-        for trial in range(num_trials):
-            env = ForestEnvironment(width=100, height=100, wind_vector=(2.8, 1.8))
-            np.random.seed(200 + trial)
-            env.canopy = np.random.uniform(0.1, 0.65, (env.H, env.W))
-            env.ignite(30, 30, radius=3)
+    print("=== INITIALIZING FIRE-SAR MISSION ENVIRONMENT ===")
+    
+    # 1. Environment (Phase 1 & 2)
+    forest = ForestEnvironment(width=60, height=60, wind_vector=(3.0, 1.8), c_slope=0.15)
+    forest.ignite(20, 20, radius=2)
 
-            survivors = [
-                SurvivorAgent(0, [34.0, 33.0], voice_radius=10.0, mobility=0.25, goal=[85.0, 85.0]),
-                SurvivorAgent(1, [35.0, 32.0], voice_radius=10.0, mobility=0.30, goal=[85.0, 85.0]),
-                SurvivorAgent(2, [42.0, 38.0], voice_radius=10.0, mobility=0.45, goal=[85.0, 85.0]),
-                SurvivorAgent(3, [46.0, 44.0], voice_radius=10.0, mobility=0.80, goal=[85.0, 85.0]),
-                SurvivorAgent(4, [52.0, 48.0], voice_radius=10.0, mobility=0.85, goal=[85.0, 85.0]),
-                SurvivorAgent(5, [58.0, 52.0], voice_radius=10.0, mobility=0.90, goal=[85.0, 85.0])
-            ]
-            for s in survivors:
-                s.health = 38.0 if s.mobility < 0.4 else 85.0
+    # 2. Agents (Phase 1 & 2)
+    survivors = [
+        SurvivorAgent(0, [26.0, 26.0], mobility=1.0),
+        SurvivorAgent(1, [27.0, 25.0], mobility=0.8),
+        SurvivorAgent(2, [28.0, 28.0], mobility=0.3),  # Injured
+        SurvivorAgent(3, [24.0, 28.0], mobility=0.9)
+    ]
 
-            uavs = [
-                UAVAgent(0, [14.0, 62.0], [10.0, 90.0], v_max=5.5, comm_radius=32.0, battery=100.0),
-                UAVAgent(1, [18.0, 58.0], [10.0, 90.0], v_max=5.2, comm_radius=32.0, battery=100.0),
-                UAVAgent(2, [25.0, 68.0], [10.0, 90.0], v_max=5.0, comm_radius=30.0, battery=100.0),
-                UAVAgent(3, [62.0, 75.0], [10.0, 90.0], v_max=5.0, comm_radius=30.0, battery=100.0),
-                UAVAgent(4, [72.0, 22.0], [10.0, 90.0], v_max=4.8, comm_radius=28.0, battery=24.0)
-            ]
-            rvs = [
-                RescueVehicle(0, [26.0, 28.0], max_speed=5.0),
-                RescueVehicle(1, [60.0, 58.0], max_speed=5.0)
-            ]
+    uavs = [
+        UAVAgent(0, [10.0, 50.0], role='Scout', v_max=5.0, comm_radius=22.0, sense_radius=15.0),
+        UAVAgent(1, [15.0, 45.0], role='Scout', v_max=5.0, comm_radius=22.0, sense_radius=15.0),
+        UAVAgent(2, [30.0, 55.0], role='Relay', v_max=4.0, comm_radius=25.0, sense_radius=18.0)
+    ]
 
-            stl_ctrl = ActiveSTLController(d_safe=5.5, d_fire=9.0, h_min=25.0, buffer_zone=6.5, k_repel=8.5)
-            default_cmds = [
-                np.array([2.2, -1.8]), np.array([2.0, -1.5]),
-                np.array([1.6, -2.0]), np.array([-1.2, -1.8]), np.array([-1.8, 1.5])
-            ]
+    # Ground Rescue Vehicles for Phase 3 ADMM Dispatch
+    rescue_vehicles = [
+        RescueVehicle(0, [2.0, 2.0], max_speed=2.5, capacity=2),
+        RescueVehicle(1, [58.0, 2.0], max_speed=3.0, capacity=2)
+    ]
 
-            first_detect_step = float(steps)
-            detected_any = False
-            stl_violation_count = 0
+    # 3. Formal Safety Controllers (Phase 4)
+    stl_controller = ActiveSTLController(d_safe=4.5, d_fire=6.0, buffer_zone=8.0, k_repel=12.0)
+    stl_monitor = STLMonitor(d_safe=4.5, d_fire=6.0)
 
-            for step in range(1, steps + 1):
-                t_now = float(step)
-                env.step(base_prob=0.18, fuel_burn_rate=0.35)
-                fc = env.get_fire_centroid()
+    # Search pattern default vectors
+    default_commands = [
+        np.array([1.2, -1.5]),
+        np.array([1.0, -1.8]),
+        np.array([-0.5, -0.8])
+    ]
 
-                for s in survivors:
-                    if not getattr(s, 'rescued', False) and s.health > 0.0:
-                        s.step(fc, env, dt=1.0)
-                        if np.linalg.norm(s.pos - fc) < 12.0:
-                            s.health = max(0.0, s.health - 3.5)
+    print("=== COMMENCING MISSION LOOP ===")
+    
+    for step in range(1, max_steps + 1):
+        current_time += dt
+        
+        # Step Environment
+        forest.step()
+        fc = forest.get_fire_centroid()
 
-                active_survivors = [s for s in survivors if not getattr(s, 'rescued', False) and s.health > 0.0]
-                for u in uavs:
-                    det = u.sense_survivors(active_survivors, env, t_now)
-                    if len(det) > 0 and not detected_any:
-                        first_detect_step = float(step)
-                        detected_any = True
+        # Step Survivors
+        for s in survivors:
+            s.step(fc, forest, dt)
 
-                if mode == "FIRE_SAR_Proposed":
-                    A, D, L, l2 = GraphManager.compute_uav_matrices(uavs)
-                    drop_mask = (np.random.rand(*A.shape) > packet_loss_prob).astype(float)
-                    drop_mask = np.triu(drop_mask, 1)
-                    drop_mask = drop_mask + drop_mask.T
-                    A_noisy = A * drop_mask
-                    GraphManager.synchronize_and_track_gradients(uavs, A_noisy, t_now)
-                    GraphManager.handle_tracking_handoff(uavs)
+        # 1. UAV Sensing (P_D Model)
+        for u in uavs:
+            u.sense_survivors(survivors, forest, current_time)
 
-                for idx, u in enumerate(uavs):
-                    if mode == "Random_Search":
-                        angle = np.random.uniform(0, 2 * np.pi)
-                        u_cmd = np.array([np.cos(angle), np.sin(angle)]) * u.v_max
-                    elif mode == "Greedy_Uncoordinated":
-                        u_cmd = u.update_behavior(t_now, default_cmds[idx], has_knowledge=(len(u.belief_map) > 0))
-                    else:
-                        has_k = any(EpistemicLogicGuard.satisfies_knowledge_check(u, s.id, current_time=t_now) for s in active_survivors)
-                        u_nom = u.update_behavior(t_now, default_cmds[idx], has_knowledge=has_k)
-                        u_cmd, _ = stl_ctrl.apply_safety_shield(idx, u_nom, uavs, env)
-                    u.step(u_cmd, env, dt=1.0)
+        # 2. Dynamic Communication Graph & Belief Synchronization
+        A_u, D_u, L_u, l2 = GraphManager.compute_uav_matrices(uavs)
+        GraphManager.synchronize_and_track_gradients(uavs, A_u, current_time)
 
-                margins = stl_ctrl.evaluate_safety_margins(uavs, env, survivors)
-                if margins['uav_spacing'] < 0.0 or margins['fire_clearance'] < 0.0:
-                    stl_violation_count += 1
+        # 3. UAV Behavioral Switch (SEARCH -> TRACK)
+        for idx, u in enumerate(uavs):
+            u_nom = u.update_behavior(current_time, default_commands[idx])
+            
+            # Phase 4: Apply STL Safety Shield (Collision / Fire Avoidance)
+            u_safe, shield_active = stl_controller.apply_safety_shield(idx, u_nom, uavs, forest)
+            if shield_active:
+                u.task = "AVOID"
+                
+            u.step(u_safe, dt)
 
-                if mode == "FIRE_SAR_Proposed":
-                    allocs = ADMMConsensusOptimizer.run_assignment(uavs, rvs, active_survivors, max_iters=15)
-                    RescueDispatchManager.step_rescue_vehicles(rvs, survivors, uavs, allocs, env, t_now, dt=1.0, require_epistemic=True)
-                elif mode == "Greedy_Uncoordinated":
-                    allocs = {sid: 0 for sid in uavs[0].belief_map.keys()}
-                    RescueDispatchManager.step_rescue_vehicles(rvs, survivors, uavs, allocs, env, t_now, dt=1.0, require_epistemic=False)
+        # 4. Handle Redundant Tracking Handoffs
+        GraphManager.handle_tracking_handoff(uavs)
 
-            alive_count = sum(1 for s in survivors if s.health > 0.0 or getattr(s, 'rescued', False))
-            rescued_count = sum(1 for s in survivors if getattr(s, 'rescued', False))
-            results[mode]['survival_rate'].append(alive_count / len(survivors))
-            results[mode]['rescued_ratio'].append(rescued_count / len(survivors))
-            results[mode]['stl_violations'].append(stl_violation_count)
-            results[mode]['detection_time'].append(first_detect_step)
+        # 5. Rescue Team Allocation via ADMM (Phase 3)
+        # Execute ADMM optimizer every 10 steps to assign trucks to targets
+        if step % 10 == 0:
+            allocations = ADMMConsensusOptimizer.run_assignment(uavs, rescue_vehicles, survivors, max_iters=20, rho=2.5)
+            if allocations:
+                print(f"[t={current_time:.1f}s] ADMM Allocations Computed: {allocations}")
 
-    return results
+            # 6. Epistemic Guarded Dispatch (Phase 4)
+            rescued_this_step = RescueDispatchManager.step_rescue_vehicles(
+                rescue_vehicles, survivors, uavs, allocations, forest, current_time, dt, pickup_radius=5.0, require_epistemic=True
+            )
+            for rid in rescued_this_step:
+                print(f">>> CRITICAL: Survivor {rid} RESCUED by Ground Team at t={current_time:.1f}s!")
 
+        # 7. STL Robustness Monitoring Logging
+        if step % 15 == 0:
+            margins = stl_monitor.evaluate_safety_margins(uavs, forest, survivors)
+            print(f"[t={current_time:.1f}s] STL Robustness | UAV Spacing: {margins['uav_spacing']:.2f} | Fire Standoff: {margins['fire_clearance']:.2f}")
+
+    print("=== MISSION COMPLETE ===")
+    
+    # Final Metric Outputs
+    total_rescued = sum([1 for s in survivors if s.rescued])
+    print(f"Total Survivors Rescued: {total_rescued} / {len(survivors)}")
+    for i, u in enumerate(uavs):
+        print(f"UAV {i} Battery Remaining: {u.battery:.1f}%")
 
 if __name__ == "__main__":
-    print("=== STARTING FIRE-SAR PHASE 4 MONTE CARLO BENCHMARKS ===")
-    mc_results = run_monte_carlo(num_trials=12, steps=28)
-    
-    print("\n=== MONTE CARLO BENCHMARK RESULTS (12 Trials, 15% Packet Loss) ===")
-    for m, metrics in mc_results.items():
-        print(f"{m:22s} | Survival: {np.mean(metrics['survival_rate']):6.1%} | "
-              f"Rescued: {np.mean(metrics['rescued_ratio']):6.1%} | "
-              f"STL Violations: {np.mean(metrics['stl_violations']):5.2f} | "
-              f"First Detect: {np.mean(metrics['detection_time']):4.2f}s")
-              
-    print("\nGenerating Executive Dashboard...")
-    generate_dashboard(mc_results)
-    print("Run complete!")
+    run_full_mission()
