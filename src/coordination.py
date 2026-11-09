@@ -20,6 +20,10 @@ class GraphManager:
 
     @staticmethod
     def get_metropolis_weights(A):
+        """
+        Calculates Metropolis-Hastings weights for decentralized
+        gradient tracking over the communication graph.
+        """
         N = A.shape[0]
         W = np.zeros((N, N))
         degrees = np.sum(A, axis=1)
@@ -37,6 +41,11 @@ class GraphManager:
 
     @staticmethod
     def synchronize_and_track_gradients(uavs, A, current_time):
+        """
+        Decentralized Gossip & Gradient Tracking.
+        Synchronizes the belief maps between connected UAVs using timestamps,
+        and executes gradient tracking to align local optimization states.
+        """
         N = len(uavs)
         W = GraphManager.get_metropolis_weights(A)
 
@@ -74,6 +83,10 @@ class GraphManager:
 
     @staticmethod
     def handle_tracking_handoff(uavs):
+        """
+        Resolves conflicts where multiple UAVs attempt to track the same target.
+        Only the closest UAV remains in TRACK mode; others revert to SEARCH.
+        """
         targets = {}
         for u in uavs:
             if u.task == "TRACK" and u.target_survivor_id is not None:
@@ -92,7 +105,8 @@ class ADMMConsensusOptimizer:
     @staticmethod
     def project_simplex(v):
         """
-        Closed-form Euclidean projection onto probability simplex
+        Closed-form Euclidean projection onto the probability simplex.
+        Ensures assignment variables sum to 1.
         """
         n = len(v)
         u = np.sort(v)[::-1]
@@ -107,6 +121,10 @@ class ADMMConsensusOptimizer:
 
     @staticmethod
     def run_assignment(uavs, rescue_vehicles, survivors, max_iters=25, rho=2.0, return_history=False):
+        """
+        Executes ADMM to solve the decentralized task allocation problem.
+        Assigns ground Rescue Vehicles to discovered survivors.
+        """
         num_rv = len(rescue_vehicles)
         num_s = len(survivors)
         if num_rv == 0 or num_s == 0:
@@ -129,29 +147,35 @@ class ADMMConsensusOptimizer:
                     else:
                         s_pos = s.pos
                         s_health = s.health
+                    
                     dist = np.linalg.norm(rv.pos - s_pos)
+                    # Cost is distance scaled by urgency (health)
                     urgency_multiplier = (120.0 - s_health) / 100.0
                     C_i[r_idx, s_idx] = dist * urgency_multiplier
             C.append(C_i)
 
         res_history = []
         for _ in range(max_iters):
+            # 1. Primal local update: proximal minimization
             for i in range(N):
                 target = Z - U[i] - (C[i] / rho)
                 for s_idx in range(num_s):
                     X[i][:, s_idx] = ADMMConsensusOptimizer.project_simplex(target[:, s_idx])
 
+            # 2. Consensus update over all estimators (Z step)
             avg_X = np.mean(X, axis=0)
             avg_U = np.mean(U, axis=0)
             for s_idx in range(num_s):
                 Z[:, s_idx] = ADMMConsensusOptimizer.project_simplex(avg_X[:, s_idx] + avg_U[:, s_idx])
 
+            # 3. Dual update (U step)
             for i in range(N):
                 U[i] += X[i] - Z
 
             res = sum(np.linalg.norm(X[i] - Z) for i in range(N))
             res_history.append(res)
 
+        # Decode discrete assignments
         allocations = {}
         for s_idx in range(num_s):
             best_rv_idx = np.argmax(Z[:, s_idx])
@@ -165,9 +189,14 @@ class ADMMConsensusOptimizer:
 class RescueDispatchManager:
     @staticmethod
     def step_rescue_vehicles(rescue_vehicles, survivors, uavs, allocations, forest, current_time, dt=1.0, pickup_radius=4.5, require_epistemic=True):
+        """
+        Translates ADMM allocations into physical movement for ground vehicles.
+        Applies Epistemic Logic checks to prevent premature/unsafe dispatch.
+        """
         rescued_ids = []
         survivor_map = {s.id: s for s in survivors}
 
+        # Clear previous targets
         for rv in rescue_vehicles:
             rv.assigned_targets = []
             if not hasattr(rv, 'path_history'):
@@ -175,14 +204,18 @@ class RescueDispatchManager:
             if not hasattr(rv, 'rescued_count'):
                 rv.rescued_count = 0
 
+        # Map ADMM allocations to active rescue vehicles
         for s_id, rv_id in allocations.items():
             if s_id in survivor_map:
                 s = survivor_map[s_id]
                 if getattr(s, 'rescued', False) or s.health <= 0.0:
                     continue
 
+                # Epistemic Logic Verification Guard
                 if require_epistemic:
-                    verified = any(EpistemicLogicGuard.satisfies_knowledge_check(u, s_id, confidence_threshold=0.55, freshness_threshold=8.0, current_time=current_time) for u in uavs)
+                    verified = any(EpistemicLogicGuard.satisfies_knowledge_check(
+                        u, s_id, confidence_threshold=0.55, freshness_threshold=8.0, current_time=current_time
+                    ) for u in uavs)
                 else:
                     verified = any(s_id in u.belief_map for u in uavs)
 
@@ -191,9 +224,10 @@ class RescueDispatchManager:
                         if rv.id == rv_id and rv.rescued_count < rv.capacity:
                             rv.assigned_targets.append(s)
 
+        # Execute kinematic motion for rescue vehicles
         for rv in rescue_vehicles:
             if len(rv.assigned_targets) > 0:
-                rv.assigned_targets.sort(key=lambda x: x.health)
+                rv.assigned_targets.sort(key=lambda x: x.health)  # Prioritize lowest health
                 target_s = rv.assigned_targets[0]
                 diff = target_s.pos - rv.pos
                 dist = np.linalg.norm(diff)
