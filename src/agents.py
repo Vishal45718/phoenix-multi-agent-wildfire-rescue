@@ -93,10 +93,11 @@ class RLUAVTaskAllocator:
 
 
 class UAVAgent:
-    def __init__(self, uav_id, pos, home_pos, v_max=5.0, comm_radius=30.0, sense_radius=14.0, b_thresh=25.0, battery=100.0):
+    def __init__(self, uav_id, pos, home_pos, role='Scout', v_max=5.0, comm_radius=30.0, sense_radius=14.0, b_thresh=25.0, battery=100.0):
         self.id = uav_id
         self.pos = np.array(pos, dtype=float)
         self.home_pos = np.array(home_pos, dtype=float)
+        self.role = role
         self.v_max = v_max
         self.comm_radius = comm_radius
         self.sense_radius = sense_radius
@@ -201,11 +202,11 @@ class UAVAgent:
 
 
 class RescueVehicle:
-    def __init__(self, rv_id, pos, max_speed=5.0):
+    def __init__(self, rv_id, pos, max_speed=5.0, capacity=3):
         self.id = rv_id
         self.pos = np.array(pos, dtype=float)
         self.max_speed = max_speed
-        self.capacity = 3
+        self.capacity = capacity
         self.assigned_targets = []
         self.rescued_count = 0
         self.path_history = [self.pos.copy()]
