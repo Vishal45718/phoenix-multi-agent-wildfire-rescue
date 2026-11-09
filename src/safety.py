@@ -7,6 +7,10 @@ class STLMonitor:
         self.h_min = h_min
 
     def evaluate_safety_margins(self, uavs, forest, survivors):
+        """
+        Evaluates the robustness margins (rho) for the STL specifications.
+        Positive margins mean the system is safe; negative means violation.
+        """
         # 1. Pairwise UAV spacing robustness: Box( ||p_i - p_j|| >= d_safe )
         min_uav_dist = float('inf')
         N = len(uavs)
@@ -45,7 +49,7 @@ class STLMonitor:
 class ActiveSTLController(STLMonitor):
     """
     Extends STLMonitor to actively filter nominal UAV velocity
-    commands u_nom whenever margins approach violation.
+    commands (u_nom) whenever margins approach violation, acting as a safety shield.
     """
     def __init__(self, d_safe=6.0, d_fire=10.0, h_min=25.0, buffer_zone=7.0, k_repel=9.0):
         super().__init__(d_safe=d_safe, d_fire=d_fire, h_min=h_min)
@@ -99,12 +103,16 @@ class EpistemicLogicGuard:
     def satisfies_knowledge_check(uav, survivor_id, confidence_threshold=0.6, freshness_threshold=8.0, current_time=0.0):
         """
         Evaluates K_i(∃ survivor) using strict criteria:
-        Requires high confidence and bounded age of the observation.
+        Requires high confidence and bounded age of the observation to guarantee
+        knowledge rather than mere belief, preventing unsafe or premature dispatch.
         """
         if survivor_id not in uav.belief_map:
             return False
+        
         record = uav.belief_map[survivor_id]
         age = current_time - record['timestamp']
+        
         if record['conf'] >= confidence_threshold and age <= freshness_threshold:
             return True
+            
         return False
