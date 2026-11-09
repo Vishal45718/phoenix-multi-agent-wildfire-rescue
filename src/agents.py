@@ -143,16 +143,21 @@ class UAVAgent:
             r_dist = np.linalg.norm(r_vec)
             if r_dist > 0.5:
                 u_cmd = (r_vec / r_dist) * self.v_max
+                # Normal aerodynamic drain while flying back
+                self.battery = max(0.0, self.battery - dt * (0.05 + 0.01 * (np.linalg.norm(u_cmd)**2)))
             else:
                 u_cmd = np.zeros(2)
-
-        speed = np.linalg.norm(u_cmd)
-        if speed > self.v_max:
-            u_cmd = (u_cmd / speed) * self.v_max
+                # Rapid recharge mechanics when landed at home base
+                self.battery = min(100.0, self.battery + 20.0 * dt)
+        else:
+            speed = np.linalg.norm(u_cmd)
+            if speed > self.v_max:
+                u_cmd = (u_cmd / speed) * self.v_max
+            # Normal aerodynamic drain while searching/tracking
+            self.battery = max(0.0, self.battery - dt * (0.05 + 0.01 * (np.linalg.norm(u_cmd)**2)))
 
         self.pos += u_cmd * dt
         self.pos = np.clip(self.pos, [0, 0], [forest.W - 1, forest.H - 1])
-        self.battery = max(0.0, self.battery - dt * (0.05 + 0.01 * (np.linalg.norm(u_cmd)**2)))
         self.path_history.append(self.pos.copy())
 
     def update_behavior(self, current_time, default_search_cmd, has_knowledge=True):
@@ -160,7 +165,12 @@ class UAVAgent:
         
         # Epistemic guard mask: forbids TRACK if has_knowledge is False
         allowed_actions = self.allocator.actions if has_knowledge else [a for a in self.allocator.actions if a != "TRACK"]
-        self.task = self.allocator.select_action(self.battery, target_detected, allowed_actions=allowed_actions)
+        
+        # If battery is full, we must not stay in RETURN mode
+        if self.battery >= 99.0 and self.task == "RETURN":
+            self.task = "SEARCH"
+        else:
+            self.task = self.allocator.select_action(self.battery, target_detected, allowed_actions=allowed_actions)
 
         reward = 0.1
         if self.task == "RETURN" and self.battery < self.b_thresh:
@@ -202,11 +212,13 @@ class UAVAgent:
 
 
 class RescueVehicle:
-    def __init__(self, rv_id, pos, max_speed=5.0, capacity=3):
+    def __init__(self, rv_id, pos, base_pos, max_speed=5.0, capacity=3):
         self.id = rv_id
         self.pos = np.array(pos, dtype=float)
+        self.base_pos = np.array(base_pos, dtype=float) # Safe zone/Hospital coordinates
         self.max_speed = max_speed
         self.capacity = capacity
         self.assigned_targets = []
         self.rescued_count = 0
         self.path_history = [self.pos.copy()]
+        self.state = "IDLE"  # States: IDLE, RESCUING, RETURNING
