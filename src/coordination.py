@@ -123,11 +123,15 @@ class ADMMConsensusOptimizer:
     def run_assignment(uavs, rescue_vehicles, survivors, max_iters=25, rho=2.0, return_history=False):
         """
         Executes ADMM to solve the decentralized task allocation problem.
-        Assigns ground Rescue Vehicles to discovered survivors.
+        Filters out Rescue Vehicles that are full and returning to base.
         """
-        num_rv = len(rescue_vehicles)
+        # Only assign tasks to vehicles that are IDLE/RESCUING and have capacity
+        active_rvs = [rv for rv in rescue_vehicles if rv.state != "RETURNING" and rv.rescued_count < rv.capacity]
+        
+        num_rv = len(active_rvs)
         num_s = len(survivors)
         if num_rv == 0 or num_s == 0:
+            if return_history: return {}, [], None, None
             return {}
 
         N = len(uavs)
@@ -139,7 +143,7 @@ class ADMMConsensusOptimizer:
         C = []
         for u in uavs:
             C_i = np.zeros((num_rv, num_s))
-            for r_idx, rv in enumerate(rescue_vehicles):
+            for r_idx, rv in enumerate(active_rvs):
                 for s_idx, s in enumerate(survivors):
                     if hasattr(u, 'belief_map') and s.id in u.belief_map:
                         s_pos = u.belief_map[s.id]['pos']
@@ -149,7 +153,6 @@ class ADMMConsensusOptimizer:
                         s_health = s.health
                     
                     dist = np.linalg.norm(rv.pos - s_pos)
-                    # Cost is distance scaled by urgency (health)
                     urgency_multiplier = (120.0 - s_health) / 100.0
                     C_i[r_idx, s_idx] = dist * urgency_multiplier
             C.append(C_i)
@@ -175,11 +178,12 @@ class ADMMConsensusOptimizer:
             res = sum(np.linalg.norm(X[i] - Z) for i in range(N))
             res_history.append(res)
 
-        # Decode discrete assignments
+        # Decode discrete assignments mapped to the ORIGINAL rv.id
         allocations = {}
         for s_idx in range(num_s):
-            best_rv_idx = np.argmax(Z[:, s_idx])
-            allocations[survivors[s_idx].id] = rescue_vehicles[best_rv_idx].id
+            best_active_rv_idx = np.argmax(Z[:, s_idx])
+            actual_rv_id = active_rvs[best_active_rv_idx].id
+            allocations[survivors[s_idx].id] = actual_rv_id
 
         if return_history:
             return allocations, res_history, Z, X
@@ -191,18 +195,34 @@ class RescueDispatchManager:
     def step_rescue_vehicles(rescue_vehicles, survivors, uavs, allocations, forest, current_time, dt=1.0, pickup_radius=4.5, require_epistemic=True):
         """
         Translates ADMM allocations into physical movement for ground vehicles.
+        Manages round-trip logistics (IDLE -> RESCUING -> RETURNING -> IDLE).
         Applies Epistemic Logic checks to prevent premature/unsafe dispatch.
         """
         rescued_ids = []
         survivor_map = {s.id: s for s in survivors}
 
-        # Clear previous targets
+        # Clear targets for all vehicles first
         for rv in rescue_vehicles:
             rv.assigned_targets = []
-            if not hasattr(rv, 'path_history'):
-                rv.path_history = [rv.pos.copy()]
-            if not hasattr(rv, 'rescued_count'):
-                rv.rescued_count = 0
+            
+            # State transitions based on capacity
+            if rv.rescued_count >= rv.capacity:
+                rv.state = "RETURNING"
+            
+            # --- LOGISTICS: RETURNING TO BASE (HOSPITAL) ---
+            if rv.state == "RETURNING":
+                diff = rv.base_pos - rv.pos
+                dist = np.linalg.norm(diff)
+                if dist <= pickup_radius:
+                    rv.rescued_count = 0  # Drop off successful, reset capacity
+                    rv.state = "IDLE"
+                else:
+                    move_dir = diff / dist
+                    step_vec = move_dir * min(rv.max_speed, dist / dt) * dt
+                    rv.pos = np.clip(rv.pos + step_vec, [0, 0], [forest.W - 1, forest.H - 1])
+                
+                rv.path_history.append(rv.pos.copy())
+                continue  # Skip ADMM assignments while returning
 
         # Map ADMM allocations to active rescue vehicles
         for s_id, rv_id in allocations.items():
@@ -221,12 +241,16 @@ class RescueDispatchManager:
 
                 if verified:
                     for rv in rescue_vehicles:
-                        if rv.id == rv_id and rv.rescued_count < rv.capacity:
+                        if rv.id == rv_id and rv.state != "RETURNING":
                             rv.assigned_targets.append(s)
 
         # Execute kinematic motion for rescue vehicles
         for rv in rescue_vehicles:
+            if rv.state == "RETURNING":
+                continue # Handled above
+
             if len(rv.assigned_targets) > 0:
+                rv.state = "RESCUING"
                 rv.assigned_targets.sort(key=lambda x: x.health)  # Prioritize lowest health
                 target_s = rv.assigned_targets[0]
                 diff = target_s.pos - rv.pos
