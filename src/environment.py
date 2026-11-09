@@ -1,49 +1,50 @@
+"""
+src/environment.py
+2D Grid Cellular Automata simulating anisotropic wildfire propagation
+governed by biomass/fuel density, dynamic ambient wind vectors, slope, and smoke plumes.
+"""
+
 import numpy as np
 from scipy.signal import correlate2d
 
+
 class ForestEnvironment:
-    """
-    2D Grid Cellular Automata simulating anisotropic wildfire propagation
-    governed by biomass/fuel density, dynamic ambient wind vectors, and slope.
-    Includes dynamic smoke plume diffusion.
-    """
-    def __init__(self, width=100, height=100, wind_vector=(3.0, 2.0), c_slope=0.1):
+    def __init__(self, width=100, height=100, wind_vector=(2.8, 1.8), c_slope=0.1):
         self.W = width
         self.H = height
         self.c_slope = c_slope
 
-        self.state = np.zeros((height, width), dtype=int)  # 0 = Unburned, 1 = Burning, 2 = Ash
+        # State: 0 = Unburned, 1 = Burning, 2 = Ash
+        self.state = np.zeros((height, width), dtype=int)
         self.fuel = np.ones((height, width), dtype=float)
         self.smoke = np.zeros((height, width), dtype=float)
-
-        # Generate topographical elevation map
-        Y, X = np.indices((height, width))
-        self.z_elev = 15.0 * np.sin(X / 15.0) + 10.0 * np.cos(Y / 20.0) + 0.5 * Y
-
-        # Tree canopy obstruction field
         self.canopy = np.random.uniform(0.1, 0.65, (height, width))
 
-        # Wind dynamics
+        # Topography (Elevation elevation gradient for slope calculation)
+        X, Y = np.meshgrid(np.linspace(0, 1, width), np.linspace(0, 1, height))
+        self.elevation = 40.0 * np.sin(2.5 * X) + 30.0 * np.cos(2.0 * Y)
+
         self.wind = np.array(wind_vector, dtype=float)
         norm = np.linalg.norm(self.wind)
         self.wind_dir = self.wind / (norm + 1e-6) if norm > 0 else np.zeros(2)
         self.wind_speed = norm
 
-    def ignite(self, x, y, radius=1):
-        """Sparks initial combustion seeds in a local neighborhood."""
+    def ignite(self, x, y, radius=2):
         for dy in range(-radius, radius + 1):
             for dx in range(-radius, radius + 1):
                 nx_c, ny_c = x + dx, y + dy
                 if 0 <= nx_c < self.W and 0 <= ny_c < self.H:
                     self.state[ny_c, nx_c] = 1
 
-    def step(self, base_prob=0.18, fuel_burn_rate=0.4):
-        """Executes one discrete cellular automaton step over the grid."""
-        burning_mask = (self.state == 1)
-        burning_indices = np.argwhere(burning_mask)
+    def step(self, base_prob=0.18, fuel_burn_rate=0.35):
+        burning_indices = np.argwhere(self.state == 1)
         new_state = self.state.copy()
 
         for y, x in burning_indices:
+            self.fuel[y, x] -= fuel_burn_rate
+            if self.fuel[y, x] <= 0.0:
+                new_state[y, x] = 2
+
             for dy in [-1, 0, 1]:
                 for dx in [-1, 0, 1]:
                     if dx == 0 and dy == 0:
@@ -53,46 +54,34 @@ class ForestEnvironment:
                         disp = np.array([dx, dy], dtype=float)
                         disp_dir = disp / np.linalg.norm(disp)
 
-                        # Wind alignment 
                         wind_alignment = np.dot(self.wind_dir, disp_dir)
                         wind_factor = max(0.0, wind_alignment) * self.wind_speed
 
-                        # Elevation slope alignment
-                        dh = self.z_elev[ny_c, nx_c] - self.z_elev[y, x]
-                        run_dist = np.linalg.norm(disp)
-                        slope = dh / run_dist
-                        slope_factor = self.c_slope * np.arctan(slope)
+                        dz = self.elevation[ny_c, nx_c] - self.elevation[y, x]
+                        slope_factor = self.c_slope * (dz / (np.linalg.norm(disp) + 1e-6))
 
-                        # Calculate ignition probability
-                        p_ignite = base_prob * (1.0 + 1.2 * wind_factor) * (1.0 + slope_factor)
+                        p_ignite = base_prob * (1.0 + 1.2 * wind_factor + max(0.0, slope_factor))
                         if np.random.rand() < p_ignite:
                             new_state[ny_c, nx_c] = 1
 
-            # Burn fuel and turn to ash if exhausted
-            self.fuel[y, x] = max(0.0, self.fuel[y, x] - fuel_burn_rate)
-            if self.fuel[y, x] <= 0.0:
-                new_state[y, x] = 2
-
         self.state = new_state
 
-        # Update smoke field using 2D correlation (diffusion)
-        fresh_smoke = np.zeros_like(self.smoke)
-        fresh_smoke[self.state == 1] = 0.8
-
-        wx, wy = int(np.round(self.wind_dir[0])), int(np.round(self.wind_dir[1]))
-        kernel = np.array([
-            [0.05, 0.10, 0.05],
-            [0.10, 0.40, 0.10],
-            [0.05, 0.10, 0.05]
-        ])
-        kernel = np.roll(kernel, (wy, wx), axis=(0, 1))
-
-        self.smoke = correlate2d(self.smoke + fresh_smoke, kernel, mode='same', boundary='symm') * 0.82
-        self.smoke = np.clip(self.smoke, 0.0, 1.0)
+        # Atmospheric smoke plume drift & decay
+        self.smoke *= 0.88
+        for y, x in burning_indices:
+            for dy in range(-4, 5):
+                for dx in range(-4, 5):
+                    sx = int(x + dx + self.wind_dir[0] * 2.0)
+                    sy = int(y + dy + self.wind_dir[1] * 2.0)
+                    if 0 <= sx < self.W and 0 <= sy < self.H:
+                        dist = np.sqrt(dx**2 + dy**2)
+                        self.smoke[sy, sx] = min(1.0, self.smoke[sy, sx] + np.exp(-dist / 2.5) * 0.6)
 
     def get_fire_centroid(self):
-        """Calculates center-of-mass of flame front to act as repellent beacon."""
         burning = np.argwhere(self.state == 1)
         if len(burning) > 0:
             return np.array([np.mean(burning[:, 1]), np.mean(burning[:, 0])])
+        burned = np.argwhere(self.state == 2)
+        if len(burned) > 0:
+            return np.array([np.mean(burned[:, 1]), np.mean(burned[:, 0])])
         return np.array([self.W / 2.0, self.H / 2.0])
