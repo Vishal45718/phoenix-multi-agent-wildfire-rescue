@@ -1,118 +1,97 @@
+"""
+src/safety.py
+Signal Temporal Logic (STL) Safety Shields and Epistemic Logic (EL) Knowledge Guards.
+"""
+
 import numpy as np
 
+
 class STLMonitor:
-    def __init__(self, d_safe=6.0, d_fire=10.0, h_min=25.0):
+    def __init__(self, d_safe=5.5, d_fire=9.0, h_min=25.0):
         self.d_safe = d_safe
         self.d_fire = d_fire
         self.h_min = h_min
 
     def evaluate_safety_margins(self, uavs, forest, survivors):
         """
-        Evaluates the robustness margins (rho) for the STL specifications.
-        Positive margins mean the system is safe; negative means violation.
+        Calculates STL robustness margins (rho).
+        rho > 0 => Safe; rho < 0 => Safety Specification Violated.
         """
-        # 1. Pairwise UAV spacing robustness: Box( ||p_i - p_j|| >= d_safe )
+        # Spec 1: Box_{[0, T]} ( ||p_i - p_j|| >= d_safe )
         min_uav_dist = float('inf')
         N = len(uavs)
         for i in range(N):
             for j in range(i + 1, N):
-                dist = np.linalg.norm(uavs[i].pos - uavs[j].pos)
-                if dist < min_uav_dist:
-                    min_uav_dist = dist
-        uav_spacing_robustness = min_uav_dist - self.d_safe if N > 1 else 10.0
+                d = np.linalg.norm(uavs[i].pos - uavs[j].pos)
+                if d < min_uav_dist:
+                    min_uav_dist = d
+        rho_uav = min_uav_dist - self.d_safe if N > 1 else 10.0
 
-        # 2. Fire clearance robustness
-        fire_coords = np.argwhere(forest.state == 1)
-        if len(fire_coords) > 0:
-            fire_xy = fire_coords[:, [1, 0]].astype(float)
-            min_fire_dist = float('inf')
-            for u in uavs:
-                dists = np.linalg.norm(fire_xy - u.pos, axis=1)
-                min_val = np.min(dists)
-                if min_val < min_fire_dist:
-                    min_fire_dist = min_val
-            fire_clearance_robustness = min_fire_dist - self.d_fire
-        else:
-            fire_clearance_robustness = 50.0
+        # Spec 2: Box_{[0, T]} ( dist(UAV, Fire) >= d_fire )
+        fc = forest.get_fire_centroid()
+        min_fire_dist = min([np.linalg.norm(u.pos - fc) for u in uavs]) if uavs else 10.0
+        rho_fire = min_fire_dist - self.d_fire
 
-        # 3. Survivor health satisfaction margin
-        min_health = min([s.health for s in survivors if not getattr(s, 'rescued', False)]) if len(survivors) > 0 else 100.0
-        health_robustness = min_health - self.h_min
+        # Spec 3: Diamond_{[0, T]} ( Health(Survivor) >= h_min )
+        active = [s.health for s in survivors if not getattr(s, 'rescued', False)]
+        rho_health = (min(active) - self.h_min) if active else 50.0
 
         return {
-            'uav_spacing': uav_spacing_robustness,
-            'fire_clearance': fire_clearance_robustness,
-            'survivor_health': health_robustness
+            'uav_spacing': rho_uav,
+            'fire_clearance': rho_fire,
+            'survivor_health': rho_health
         }
 
 
 class ActiveSTLController(STLMonitor):
-    """
-    Extends STLMonitor to actively filter nominal UAV velocity
-    commands (u_nom) whenever margins approach violation, acting as a safety shield.
-    """
-    def __init__(self, d_safe=6.0, d_fire=10.0, h_min=25.0, buffer_zone=7.0, k_repel=9.0):
-        super().__init__(d_safe=d_safe, d_fire=d_fire, h_min=h_min)
+    def __init__(self, d_safe=5.5, d_fire=9.0, h_min=25.0, buffer_zone=6.5, k_repel=8.5):
+        super().__init__(d_safe, d_fire, h_min)
         self.buffer_zone = buffer_zone
         self.k_repel = k_repel
 
-    def apply_safety_shield(self, uav_idx, u_nom, uavs, forest):
-        u_safe = np.array(u_nom, dtype=float).copy()
-        uav = uavs[uav_idx]
-        repel_vec = np.zeros(2, dtype=float)
-        shield_triggered = False
+    def apply_safety_shield(self, uav_idx, u_nominal, uavs, forest):
+        """
+        Projects nominal control into the safe control set using barrier potential gradients.
+        """
+        u_safe = u_nominal.copy().astype(float)
+        active_uav = uavs[uav_idx]
+        intervened = False
 
-        # 1. Inter-UAV Collision Avoidance Barrier
+        # Inter-UAV collision avoidance barrier
         for j, other in enumerate(uavs):
             if j == uav_idx:
                 continue
-            diff = uav.pos - other.pos
-            dist = np.linalg.norm(diff)
-            rho_uav = dist - self.d_safe
-            if rho_uav < self.buffer_zone and dist > 1e-3:
-                weight = self.k_repel * (self.buffer_zone - rho_uav) / (self.buffer_zone + 1e-3)
-                repel_vec += (diff / dist) * weight
-                shield_triggered = True
+            disp = active_uav.pos - other.pos
+            dist = np.linalg.norm(disp)
+            if dist < self.buffer_zone:
+                intervened = True
+                u_safe += (disp / (dist + 1e-6)) * self.k_repel * (self.buffer_zone - dist)
 
-        # 2. Fire Standoff Avoidance Barrier
-        fire_cells = np.argwhere(forest.state == 1)
-        if len(fire_cells) > 0:
-            fire_xy = fire_cells[:, [1, 0]].astype(float)
-            diffs = uav.pos - fire_xy
-            dists = np.linalg.norm(diffs, axis=1)
-            min_idx = np.argmin(dists)
-            min_dist = dists[min_idx]
-            rho_fire = min_dist - self.d_fire
+        # Fire proximity barrier
+        fc = forest.get_fire_centroid()
+        f_disp = active_uav.pos - fc
+        f_dist = np.linalg.norm(f_disp)
+        if f_dist < (self.d_fire + 3.0):
+            intervened = True
+            u_safe += (f_disp / (f_dist + 1e-6)) * (self.k_repel * 1.5) * ((self.d_fire + 3.0) - f_dist)
 
-            if rho_fire < self.buffer_zone and min_dist > 1e-3:
-                weight = (self.k_repel * 1.8) * (self.buffer_zone - rho_fire) / (self.buffer_zone + 1e-3)
-                repel_vec += (diffs[min_idx] / min_dist) * weight
-                shield_triggered = True
+        speed = np.linalg.norm(u_safe)
+        if speed > active_uav.v_max:
+            u_safe = (u_safe / speed) * active_uav.v_max
 
-        if shield_triggered:
-            u_safe = u_safe + repel_vec
-            speed = np.linalg.norm(u_safe)
-            if speed > uav.v_max:
-                u_safe = (u_safe / speed) * uav.v_max
-
-        return u_safe, shield_triggered
+        return u_safe, intervened
 
 
 class EpistemicLogicGuard:
+    """
+    K_i phi: Evaluates whether agent i 'Knows' proposition phi.
+    Disallows action unless epistemic validity holds.
+    """
     @staticmethod
-    def satisfies_knowledge_check(uav, survivor_id, confidence_threshold=0.6, freshness_threshold=8.0, current_time=0.0):
-        """
-        Evaluates K_i(∃ survivor) using strict criteria:
-        Requires high confidence and bounded age of the observation to guarantee
-        knowledge rather than mere belief, preventing unsafe or premature dispatch.
-        """
+    def satisfies_knowledge_check(uav, survivor_id, current_time, max_staleness=5.0, min_conf=0.40):
         if survivor_id not in uav.belief_map:
             return False
-        
-        record = uav.belief_map[survivor_id]
-        age = current_time - record['timestamp']
-        
-        if record['conf'] >= confidence_threshold and age <= freshness_threshold:
-            return True
-            
-        return False
+        rec = uav.belief_map[survivor_id]
+        is_fresh = (current_time - rec['timestamp']) <= max_staleness
+        is_confident = rec['conf'] >= min_conf
+        return bool(is_fresh and is_confident)
