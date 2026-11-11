@@ -44,10 +44,11 @@ class STLMonitor:
 
 
 class ActiveSTLController(STLMonitor):
-    def __init__(self, d_safe=5.5, d_fire=9.0, h_min=25.0, buffer_zone=6.5, k_repel=8.5):
+    def __init__(self, d_safe=5.5, d_fire=9.0, h_min=25.0, buffer_zone=5.8, k_repel=8.5, fire_clearance_trigger=9.5):
         super().__init__(d_safe, d_fire, h_min)
         self.buffer_zone = buffer_zone
         self.k_repel = k_repel
+        self.fire_clearance_trigger = fire_clearance_trigger
 
     def apply_safety_shield(self, uav_idx, u_nominal, uavs, forest):
         """
@@ -71,9 +72,10 @@ class ActiveSTLController(STLMonitor):
         fc = forest.get_fire_centroid()
         f_disp = active_uav.pos - fc
         f_dist = np.linalg.norm(f_disp)
-        if f_dist < (self.d_fire + 3.0):
+        fire_trigger = getattr(self, 'fire_clearance_trigger', 9.5)
+        if f_dist < fire_trigger:
             intervened = True
-            u_safe += (f_disp / (f_dist + 1e-6)) * (self.k_repel * 1.5) * ((self.d_fire + 3.0) - f_dist)
+            u_safe += (f_disp / (f_dist + 1e-6)) * (self.k_repel * 1.5) * (fire_trigger - f_dist)
 
         speed = np.linalg.norm(u_safe)
         if speed > active_uav.v_max:
@@ -88,7 +90,7 @@ class EpistemicLogicGuard:
     Disallows action unless epistemic validity holds.
     """
     @staticmethod
-    def satisfies_knowledge_check(uav, survivor_id, current_time, max_staleness=5.0, min_conf=0.40):
+    def satisfies_knowledge_check(uav, survivor_id, current_time, max_staleness=8.0, min_conf=0.30):
         if survivor_id not in uav.belief_map:
             return False
         rec = uav.belief_map[survivor_id]

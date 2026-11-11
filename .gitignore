@@ -1,0 +1,11 @@
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.png
+FIRE_SAR_Raw_Trials_*.csv
+FIRE_SAR_Summary_*.csv
+.pytest_cache/

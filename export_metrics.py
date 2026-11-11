@@ -8,7 +8,7 @@ import numpy as np
 import datetime
 from main import run_monte_carlo
 
-def export_benchmark_to_csv(num_trials=10):
+def export_benchmark_to_csv(num_trials=30):
     print(f"Running benchmarking suite for {num_trials} trials...")
     # Run the Monte Carlo simulation from main.py
     results = run_monte_carlo(num_trials=num_trials, steps=45)
@@ -53,4 +53,4 @@ def export_benchmark_to_csv(num_trials=10):
     print(summary.to_string())
 
 if __name__ == "__main__":
-    export_benchmark_to_csv(num_trials=10)
+    export_benchmark_to_csv(num_trials=30)

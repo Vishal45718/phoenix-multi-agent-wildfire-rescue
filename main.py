@@ -16,8 +16,10 @@ from src.safety import ActiveSTLController, EpistemicLogicGuard
 from src.coordination import GraphManager, ADMMConsensusOptimizer, RescueDispatchManager
 from src.visualization import generate_dashboard
 
+packet_loss_rate = 0.02
 
-def run_monte_carlo(num_trials=10, steps=45, packet_loss_prob=0.15, malfunction_step=15):
+
+def run_monte_carlo(num_trials=10, steps=45, packet_loss_prob=0.02, malfunction_step=15, packet_loss_rate=0.02):
     modes = ["Random_Search", "Nearest_Agent", "Greedy_Uncoordinated", "FIRE_SAR_Proposed"]
     results = {
         m: {
@@ -64,11 +66,11 @@ def run_monte_carlo(num_trials=10, steps=45, packet_loss_prob=0.15, malfunction_
 
             # Ground Logistics Vehicles
             rvs = [
-                RescueVehicle(0, pos=[26.0, 28.0], base_pos=[5.0, 5.0], max_speed=5.0, capacity=3),
-                RescueVehicle(1, pos=[60.0, 58.0], base_pos=[95.0, 5.0], max_speed=5.0, capacity=3)
+                RescueVehicle(0, pos=[26.0, 28.0], base_pos=[5.0, 5.0], max_speed=7.0, capacity=4),
+                RescueVehicle(1, pos=[60.0, 58.0], base_pos=[95.0, 5.0], max_speed=7.0, capacity=4)
             ]
 
-            stl_ctrl = ActiveSTLController(d_safe=5.5, d_fire=9.0, h_min=25.0, buffer_zone=6.5, k_repel=8.5)
+            stl_ctrl = ActiveSTLController(d_safe=5.5, d_fire=9.0, h_min=25.0, buffer_zone=5.8, k_repel=8.5, fire_clearance_trigger=9.5)
             default_cmds = [
                 np.array([2.2, -1.8]), np.array([2.0, -1.5]),
                 np.array([1.6, -2.0]), np.array([-1.2, -1.8]), np.array([-1.8, 1.5])
@@ -106,7 +108,8 @@ def run_monte_carlo(num_trials=10, steps=45, packet_loss_prob=0.15, malfunction_
                 # --- Communication & Information Sharing ---
                 if mode == "FIRE_SAR_Proposed":
                     A, D, L, l2 = GraphManager.compute_uav_matrices(uavs)
-                    drop_mask = (np.random.rand(*A.shape) > packet_loss_prob).astype(float)
+                    effective_loss = packet_loss_rate if packet_loss_rate != 0.00 else packet_loss_prob
+                    drop_mask = (np.random.rand(*A.shape) > effective_loss).astype(float)
                     drop_mask = np.triu(drop_mask, 1)
                     drop_mask = drop_mask + drop_mask.T
                     A_noisy = A * drop_mask

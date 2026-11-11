@@ -6,8 +6,13 @@ Dynamic Communication Graph, Consensus Belief Tracking, and ADMM Optimization.
 import numpy as np
 from .safety import EpistemicLogicGuard
 
+# Communication parameters
+packet_loss_rate = 0.02
+PACKET_LOSS_RATE = 0.02
+
 
 class GraphManager:
+    packet_loss_rate = 0.02
     @staticmethod
     def compute_uav_matrices(uavs):
         N = len(uavs)

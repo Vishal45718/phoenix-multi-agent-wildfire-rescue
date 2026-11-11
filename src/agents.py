@@ -5,6 +5,13 @@ Includes the 5-action Q-Learning Task Allocator.
 """
 
 import numpy as np
+from .safety import EpistemicLogicGuard
+
+# Epistemic belief parameters & operational thresholds
+MAX_EPISTEMIC_BELIEF_AGE = 8.0
+MIN_CONFIDENCE_CUTOFF = 0.30
+LOW_BATTERY_THRESHOLD = 0.20
+RETURN_THRESHOLD = 0.15
 
 
 class SurvivorAgent:
@@ -53,36 +60,66 @@ class SurvivorAgent:
 
 class RLUAVTaskAllocator:
     """
-    Tabular Q-learning policy deciding high-level UAV actions:
-    SEARCH, TRACK, HANDOFF, SUPPORT_RESCUE, RETURN
+    CTDE / Value-Decomposition Q-Learning with:
+    1. Counterfactual Baseline V^pi(s) = sum_a pi(a|s) Q(s,a) (RLBasics.pdf & MARL_Lecture.pdf)
+    2. External Regret R_T & Average Regret R_T / T tracking (Regret_MARL.pdf)
     """
-    def __init__(self, actions=None):
+    def __init__(self, actions=None, low_battery_threshold=0.20, return_threshold=0.15):
         if actions is None:
             self.actions = ["SEARCH", "TRACK", "HANDOFF", "SUPPORT_RESCUE", "RETURN"]
         else:
             self.actions = actions
+        self.low_battery_threshold = low_battery_threshold
+        self.return_threshold = return_threshold
 
-        # State Discretization: (battery_low [0/1], target_detected [0/1], high_fire_risk [0/1])
-        # Values initialized with pre-trained converged heuristics
+        # Pre-trained CTDE Q-table: state = (bat_low, target_detected, high_fire_risk)
         self.q_table = {
-            (0, 0, 0): np.array([4.5, 0.0, 0.0, 0.0, 0.0]),
-            (0, 1, 0): np.array([0.5, 5.0, 2.0, 3.5, 0.0]),
-            (0, 1, 1): np.array([0.2, 1.0, 4.8, 1.5, 0.5]),
-            (0, 0, 1): np.array([1.5, 0.0, 0.0, 0.0, 2.0]),
-            (1, 0, 0): np.array([0.1, 0.0, 0.0, 0.0, 5.5]),
-            (1, 1, 0): np.array([0.1, 0.5, 5.2, 0.5, 5.0]),
-            (1, 1, 1): np.array([0.0, 0.2, 5.5, 0.2, 6.0]),
-            (1, 0, 1): np.array([0.0, 0.0, 0.0, 0.0, 6.0])
-        }
-        self.lr = 0.1
-        self.discount = 0.92
-        self.epsilon = 0.08
+    (0, 0, 0): np.array([34.60, 0.00, 37.50, 34.60, 34.60]),
+    (0, 1, 0): np.array([46.07, 50.00, 48.98, 46.10, 46.09]),
+    (0, 1, 1): np.array([45.30, 50.00, 48.45, 45.67, 45.19]),
+    (0, 0, 1): np.array([34.46, 0.00, 37.50, 34.57, 34.34]),
+    (1, 0, 0): np.array([0.10, 0.00, 0.00, 0.00, 5.50]),
+    (1, 1, 0): np.array([0.10, 0.50, 5.20, 0.50, 5.00]),
+    (1, 1, 1): np.array([0.00, 0.20, 5.50, 0.20, 6.00]),
+    (1, 0, 1): np.array([0.00, 0.00, 0.00, 0.00, 6.00]),
+}
+        self.lr = 0.10        # Learning rate alpha (Convex mixing weight)
+        self.discount = 0.92  # Discount factor gamma
+        self.epsilon = 0.08   # Exploration probability
+
+        # --- Regret Analysis Trackers (Dr. Renganathan's Regret_MARL.pdf) ---
+        self.T_rounds = 0
+        self.cum_actual_reward = 0.0
+        self.cum_fixed_action_rewards = np.zeros(len(self.actions))
+        self.cum_baseline = 0.0
+        self.cum_advantage = 0.0
 
     def _get_state(self, battery, target_detected, fire_risk):
-        bat_low = 1 if battery < 28.0 else 0
+        thresh = self.low_battery_threshold * 100.0 if battery > 1.0 and self.low_battery_threshold <= 1.0 else self.low_battery_threshold
+        bat_low = 1 if battery < thresh else 0
         det = 1 if target_detected else 0
         risk = 1 if fire_risk > 0.45 else 0
         return (bat_low, det, risk)
+
+    def get_policy_distribution(self, state):
+        """Computes mixed strategy pi(a|s) under epsilon-greedy exploration."""
+        n_act = len(self.actions)
+        pi = np.ones(n_act) * (self.epsilon / n_act)
+        best_a = int(np.argmax(self.q_table[state]))
+        pi[best_a] += (1.0 - self.epsilon)
+        return pi
+
+    def get_state_value_and_advantage(self, state, action_idx):
+        """
+        Uses Law of Total Expectation (RLBasics.pdf p.4) & Counterfactual Baseline (MARL_Lecture.pdf p.19):
+        V^pi(s) = B_t = sum_a pi(a|s) Q(s,a)
+        A^pi(s, a) = Q(s, a) - V^pi(s)
+        """
+        pi = self.get_policy_distribution(state)
+        q_vals = self.q_table[state]
+        v_pi = float(np.dot(pi, q_vals))      # Counterfactual Baseline B_t
+        advantage = float(q_vals[action_idx] - v_pi)  # Advantage A_t
+        return v_pi, advantage
 
     def select_action(self, battery, target_detected, fire_risk=0.0, allowed_actions=None):
         state = self._get_state(battery, target_detected, fire_risk)
@@ -98,6 +135,18 @@ class RLUAVTaskAllocator:
         best_idx = valid_indices[np.argmax([q_vals[i] for i in valid_indices])]
         return self.actions[best_idx]
 
+    def evaluate_counterfactual_rewards(self, state):
+        """Returns counterfactual immediate reward vector r(s, a) for all fixed actions a in A."""
+        bat_low, det, risk = state
+        r_vec = np.array([0.5, 0.1, 0.1, 0.1, 0.1])  # Default: SEARCH is useful
+        if bat_low == 1:
+            r_vec = np.array([-1.0, -1.0, 3.0, -1.0, 5.0])  # Low battery: RETURN/HANDOFF best
+        elif det == 1 and risk == 0:
+            r_vec = np.array([0.2, 4.5, 1.5, 3.0, -0.5])    # Survivor spotted: TRACK best
+        elif det == 1 and risk == 1:
+            r_vec = np.array([0.1, 0.5, 4.5, 1.0, 1.0])     # High fire risk: HANDOFF best
+        return r_vec
+
     def update(self, battery, target_detected, fire_risk, action, reward, next_battery, next_detected, next_risk):
         state = self._get_state(battery, target_detected, fire_risk)
         next_state = self._get_state(next_battery, next_detected, next_risk)
@@ -108,13 +157,51 @@ class RLUAVTaskAllocator:
             self.q_table[next_state] = np.zeros(len(self.actions))
 
         act_idx = self.actions.index(action)
-        best_next_q = np.max(self.q_table[next_state])
-        self.q_table[state][act_idx] += self.lr * (reward + self.discount * best_next_q - self.q_table[state][act_idx])
+
+        # 1. Sample Bellman Optimality Target Y_t & Convex Mixing Update (RLBasics.pdf p.7)
+        Y_t = reward + self.discount * np.max(self.q_table[next_state])
+        self.q_table[state][act_idx] = (1.0 - self.lr) * self.q_table[state][act_idx] + self.lr * Y_t
+
+        # 2. Update External Regret & Counterfactual Advantage (Regret_MARL.pdf Section 3 & 8)
+        self.T_rounds += 1
+        r_all = self.evaluate_counterfactual_rewards(state)
+        r_actual = r_all[act_idx]
+
+        pi = self.get_policy_distribution(state)
+        B_t = float(np.dot(pi, r_all))       # Counterfactual baseline reward
+        A_t = float(r_actual - B_t)          # Instantaneous advantage
+
+        self.cum_actual_reward += r_actual
+        self.cum_fixed_action_rewards += r_all
+        self.cum_baseline += B_t
+        self.cum_advantage += A_t
+
+    def get_regret_metrics(self):
+        """
+        Returns:
+        - External Regret: R_T = max_a sum r(a, b_t) - sum r(a_t, b_t)
+        - Positive Regret: [R_T]_+ = max(R_T, 0)
+        - Average Regret:  R_bar_T = [R_T]_+ / T
+        """
+        if self.T_rounds == 0:
+            return {'R_T': 0.0, 'R_pos': 0.0, 'avg_regret': 0.0, 'advantage_sum': 0.0}
+        best_fixed = float(np.max(self.cum_fixed_action_rewards))
+        R_T = best_fixed - self.cum_actual_reward
+        R_pos = max(0.0, R_T)
+        avg_regret = R_pos / self.T_rounds
+        return {
+            'R_T': R_T,
+            'R_pos': R_pos,
+            'avg_regret': avg_regret,
+            'advantage_sum': self.cum_advantage
+        }
 
 
 class UAVAgent:
     def __init__(self, uav_id, pos, home_pos, role='Scout', v_max=5.0, comm_radius=30.0,
-                 sense_radius=14.0, b_thresh=25.0, battery=100.0):
+                 sense_radius=14.0, b_thresh=15.0, battery=100.0,
+                 low_battery_threshold=0.20, return_threshold=0.15,
+                 max_epistemic_belief_age=8.0, min_confidence_cutoff=0.30):
         self.id = uav_id
         self.pos = np.array(pos, dtype=float)
         self.home_pos = np.array(home_pos, dtype=float)
@@ -122,13 +209,17 @@ class UAVAgent:
         self.v_max = v_max
         self.comm_radius = comm_radius
         self.sense_radius = sense_radius
+        self.low_battery_threshold = low_battery_threshold
+        self.return_threshold = return_threshold
         self.b_thresh = b_thresh
         self.battery = battery
         self.sensor_quality = 0.92
+        self.max_epistemic_belief_age = max_epistemic_belief_age
+        self.min_confidence_cutoff = min_confidence_cutoff
 
         self.task = "SEARCH"
         self.target_survivor_id = None
-        self.allocator = RLUAVTaskAllocator()
+        self.allocator = RLUAVTaskAllocator(low_battery_threshold=self.low_battery_threshold, return_threshold=self.return_threshold)
         self.belief_map = {}
         self.gradient_tracker = np.zeros(2)
         self.path_history = [self.pos.copy()]
@@ -191,7 +282,8 @@ class UAVAgent:
 
         # Reward model
         reward = 0.1
-        if self.task == "RETURN" and self.battery < self.b_thresh:
+        return_cutoff = self.return_threshold * 100.0 if self.return_threshold <= 1.0 else self.return_threshold
+        if self.task == "RETURN" and self.battery < return_cutoff:
             reward = 5.0
         elif self.task == "TRACK" and target_detected and has_knowledge:
             reward = 4.0
@@ -207,7 +299,7 @@ class UAVAgent:
             age = current_time - rec['timestamp']
             freshness = np.exp(-0.15 * age)
             score = rec['conf'] * freshness
-            if score > best_score and age < 6.0:
+            if score > best_score and age <= self.max_epistemic_belief_age and rec['conf'] >= self.min_confidence_cutoff:
                 best_score = score
                 best_target = rec['pos']
                 self.target_survivor_id = sid
@@ -228,7 +320,7 @@ class UAVAgent:
 
 
 class RescueVehicle:
-    def __init__(self, rv_id, pos, base_pos, max_speed=5.0, capacity=3):
+    def __init__(self, rv_id, pos, base_pos, max_speed=7.0, capacity=4):
         self.id = rv_id
         self.pos = np.array(pos, dtype=float)
         self.base_pos = np.array(base_pos, dtype=float)
