@@ -1,0 +1,5 @@
+Strategy,Survival_Rate_%,Rescued_Ratio_%,STL_Safety_Violations,Detection_Time_sec,Battery_Consumed_Joules
+FIRE_SAR_Proposed,66.0,61.0,10.6,1.2,134.5
+Greedy_Uncoordinated,80.0,80.0,29.4,1.2,131.43
+Nearest_Agent,80.0,80.0,57.3,1.2,147.18
+Random_Search,50.0,0.0,12.4,1.2,172.05
