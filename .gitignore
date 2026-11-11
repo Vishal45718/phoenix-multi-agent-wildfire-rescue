@@ -8,4 +8,5 @@ __pycache__/
 .pytest_cache/
 /FIRE_SAR_*.csv
 /executive_dashboard.png
+/simulation_output.png
 /phase1_simulation_output.png
